@@ -1,0 +1,43 @@
+#!/usr/bin/env python3
+"""musikalice: управление станцией с компьютера через ADB (обёртка над командой на станции)."""
+import argparse
+import os
+import shlex
+import subprocess
+import sys
+
+REMOTE = "/usr/bin/musikalice"
+INTERACTIVE = ("tui", "login")
+
+
+def select_device(parser, explicit):
+    if explicit:
+        return explicit
+    result = subprocess.run(["adb", "devices"], text=True, capture_output=True)
+    if result.returncode:
+        parser.error(result.stderr.strip() or "adb devices завершился с ошибкой")
+    devices = [f[0] for line in result.stdout.splitlines() if len(f := line.split()) == 2 and f[1] == "device"]
+    if len(devices) == 1:
+        return devices[0]
+    parser.error("укажите устройство через --device или MUSIKALICE_DEVICE; подключены: " + (", ".join(devices) or "нет"))
+
+
+def main():
+    parser = argparse.ArgumentParser(description="musikalice по ADB; все остальные аргументы передаются команде на станции")
+    parser.add_argument("--device", default=os.environ.get("MUSIKALICE_DEVICE"), help="серийный номер или IP:порт ADB")
+    parser.add_argument("command", nargs="?", default="tui")
+    parser.add_argument("value", nargs=argparse.REMAINDER)
+    args = parser.parse_args()
+    remote = shlex.join([REMOTE, args.command, *args.value])
+    adb = ["adb", "-s", select_device(parser, args.device), "shell"]
+    if args.command in INTERACTIVE:
+        if not sys.stdin.isatty():
+            parser.error(args.command + " требует интерактивный терминал")
+        columns, rows = os.get_terminal_size() if sys.stdout.isatty() else (80, 24)
+        remote = f"stty rows {rows} cols {columns}; exec {remote}"
+        adb.append("-t")
+    os.execvp("adb", adb + [remote])
+
+
+if __name__ == "__main__":
+    sys.exit(main())

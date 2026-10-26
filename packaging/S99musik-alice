@@ -1,0 +1,19 @@
+#!/bin/sh
+set -eu
+MUSIKALICE_DIR=/data/opt/musik-alice
+case "${1:-}" in
+    start)
+        [ ! -x "$MUSIKALICE_DIR/start.sh" ] || "$MUSIKALICE_DIR/start.sh"
+        ;;
+    stop)
+        [ ! -x "$MUSIKALICE_DIR/stop.sh" ] || "$MUSIKALICE_DIR/stop.sh"
+        ;;
+    restart)
+        "$0" stop
+        "$0" start
+        ;;
+    *)
+        echo "Usage: $0 {start|stop|restart}" >&2
+        exit 1
+        ;;
+esac
