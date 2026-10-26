@@ -268,20 +268,27 @@ impl Engine {
     fn on_alice(&mut self, event: AliceEvent) {
         match event {
             AliceEvent::Busy(busy) => {
+                eprintln!("[алиса] диалог: {}", if busy { "идёт" } else { "закончился" });
                 self.busy = busy;
                 self.ducking.set_busy(busy);
                 self.guard.activity(busy, self.now_ms());
             }
             AliceEvent::Recognized { text } => {
                 if !self.cfg.voice {
+                    eprintln!("[алиса] распознано «{text}» — голос выключен, пропускаю");
                     return;
                 }
                 if intent::native_volume_request(&text) {
+                    eprintln!("[алиса] распознано «{text}» — громкость, остаётся Алисе");
                     self.guard.native_command();
                     return;
                 }
-                let Some(parsed) = intent::from_speech(&text) else { return };
+                let Some(parsed) = intent::from_speech(&text) else {
+                    eprintln!("[алиса] распознано «{text}» — не музыкальная команда, остаётся Алисе");
+                    return;
+                };
                 if parsed.needs_active_session() && self.session.is_none() {
+                    eprintln!("[алиса] распознано «{text}» — {parsed}, но musik сейчас не играет: остаётся Алисе");
                     return;
                 }
                 let mut parsed = parsed;
@@ -291,10 +298,13 @@ impl Engine {
                     if self.cfg.voice_radio_fallback && intent::normalize(&text).ends_with("музыку") {
                         parsed = Intent::Radio;
                     } else {
+                        eprintln!("[алиса] распознано «{text}» — продолжать нечего: остаётся Алисе");
                         return;
                     }
                 }
+                eprintln!("[алиса] распознано «{text}» → {parsed}");
                 let reply = self.command(parsed, true);
+                eprintln!("[алиса] ответ: {reply}");
                 self.message = reply;
             }
         }
