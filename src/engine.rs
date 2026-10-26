@@ -119,6 +119,8 @@ pub struct Engine {
     next_library_ms: u64,
     last_progress_ms: u64,
     last_native_pause_ms: u64,
+    /// До какого момента повторять паузу штатного плеера.
+    native_pause_until_ms: u64,
     rng: Rng,
     /// Следующий начавшийся трек нужно объявить голосом (музыку запустили голосовой командой).
     announce_next: bool,
@@ -132,6 +134,12 @@ const LIBRARY_REFRESH_MS: u64 = 30 * 60_000;
 const LIBRARY_RETRY_MS: u64 = 30_000;
 const PROGRESS_MS: u64 = 30_000;
 const NATIVE_PAUSE_MS: u64 = 500;
+/// Сколько после запуска musik или диалога с Алисой продолжать ставить её плеер на паузу. Постоянный поток пауз
+/// (каждый — директива и запись в журнал прошивки) Алисе вредит, а свою музыку она запускает только после диалога.
+#[cfg(not(test))]
+const NATIVE_PAUSE_WINDOW_MS: u64 = 6_000;
+#[cfg(test)]
+const NATIVE_PAUSE_WINDOW_MS: u64 = 1_500;
 const MAX_FAILURES: u32 = 3;
 
 impl Engine {
@@ -165,6 +173,7 @@ impl Engine {
             next_library_ms: 0,
             last_progress_ms: 0,
             last_native_pause_ms: 0,
+            native_pause_until_ms: 0,
             rng: Rng::new(),
         }
     }
@@ -303,8 +312,13 @@ impl Engine {
             None => {}
         }
         // Пока играет musik, штатный плеер Алисы держим на паузе: она запускает свою музыку с задержкой,
-        // уже после диалога, и одного нажатия при команде не хватает.
-        if self.cfg.native_pause && self.state == State::Playing && now >= self.last_native_pause_ms + NATIVE_PAUSE_MS {
+        // уже после диалога, и одного нажатия при команде не хватает. Повторяем только несколько секунд после
+        // запуска и после каждого диалога.
+        if self.cfg.native_pause
+            && self.state == State::Playing
+            && now < self.native_pause_until_ms
+            && now >= self.last_native_pause_ms + NATIVE_PAUSE_MS
+        {
             self.last_native_pause_ms = now;
             self.native.pause_native();
         }
@@ -323,6 +337,8 @@ impl Engine {
             AliceEvent::Busy(busy) => {
                 if busy != self.busy {
                     eprintln!("[алиса] диалог: {}", if busy { "идёт" } else { "закончился" });
+                    // Диалог мог закончиться запуском её музыки: несколько секунд держим её плеер на паузе.
+                    self.hold_native_paused();
                 }
                 self.busy = busy;
                 self.ducking.set_busy(busy);
@@ -362,7 +378,11 @@ impl Engine {
                     }
                 }
                 if self.transport_duplicate(&parsed) {
+                    // Команду уже выполнили по журналу, но Алиса всё равно обрабатывает этот запрос и применила бы
+                    // его к своему плееру («продолжи» запустил бы Яндекс Музыку). Обрываем.
                     eprintln!("[алиса] распознано «{text}» — уже выполнено по короткой команде");
+                    self.native.cancel();
+                    self.hold_native_paused();
                     return;
                 }
                 eprintln!("[алиса] распознано «{text}» → {parsed}");
@@ -395,6 +415,10 @@ impl Engine {
                 self.message = self.command(parsed, false);
             }
         }
+    }
+
+    fn hold_native_paused(&mut self) {
+        self.native_pause_until_ms = self.now_ms() + NATIVE_PAUSE_WINDOW_MS;
     }
 
     /// Та же транспортная команда меньше чем через 2,5 с — повтор одной фразы, пришедшей двумя путями.
@@ -604,6 +628,7 @@ impl Engine {
         self.ticket += 1;
         self.failures = 0;
         self.native.prepare_playback(from_voice, self.cfg.native_pause);
+        self.hold_native_paused();
         self.announce_next = from_voice;
         if let Some(now) = &self.now {
             // Закрываем прежний трек как пропущенный, чтобы вкус не терял сигнал.
@@ -722,6 +747,7 @@ impl Engine {
 
     fn resume(&mut self, from_voice: bool) {
         self.native.prepare_playback(from_voice, self.cfg.native_pause);
+        self.hold_native_paused();
         self.player.resume();
         self.state = if self.now.as_ref().is_some_and(|n| n.started) { State::Playing } else { State::Loading };
     }
@@ -1242,6 +1268,18 @@ mod tests {
         let settled = pauses(&rig);
         thread::sleep(Duration::from_millis(1100));
         assert_eq!(pauses(&rig), settled);
+    }
+
+    #[test]
+    fn duplicate_phrase_from_alice_is_cancelled() {
+        let rig = Rig::paced();
+        rig.handle.request(Intent::Radio, false).unwrap();
+        rig.wait("играет", |s| s.state == State::Playing);
+        rig.handle.tx.send(Msg::Alice(AliceEvent::Spotted { text: "стоп".into() })).unwrap();
+        rig.wait("пауза", |s| s.state == State::Paused);
+        rig.say("стоп");
+        thread::sleep(Duration::from_millis(200));
+        assert!(rig.native.calls.lock().unwrap().contains(&"cancel".to_string()), "запрос Алисы надо оборвать");
     }
 
     #[test]
