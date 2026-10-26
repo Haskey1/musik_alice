@@ -3,6 +3,7 @@
 //! Один бинарник: служба (`run`), супервизор (`supervise`), консольные команды и TUI.
 
 mod alice;
+mod announce;
 mod api;
 mod audio;
 mod config;
@@ -112,6 +113,7 @@ musikalice — клиент сервера musik для Яндекс Станц�
   volume 0-100 | like | dislike | voice on|off | release | retry
   status [--json]           что играет сейчас
   tui                       интерактивный экран
+  speak ТЕКСТ               Алиса произносит текст (проверка объявлений, служба не нужна)
 Прочее:
   version | help
 ";
@@ -157,6 +159,16 @@ fn dispatch(args: &[String], paths: &Paths) -> Result<ExitCode, String> {
                 return Err("что включить? Например: musikalice play Radiohead".into());
             }
             say(paths, &format!("PLAY {}", rest(1).join(" ")))?;
+        }
+        Some("speak") => {
+            if rest(1).is_empty() {
+                return Err("что сказать? Например: musikalice speak Radiohead, Creep".into());
+            }
+            if !announce::available() {
+                return Err("на этом устройстве нет консоли Алисы (/system/vendor/quasar/maind)".into());
+            }
+            announce::speak(&rest(1).join(" "))?;
+            println!("отправлено Алисе: «{} {}»", announce::PREFIX, rest(1).join(" "));
         }
         Some("mix") => {
             if rest(1).is_empty() {
@@ -362,7 +374,7 @@ fn config_command(paths: &Paths, args: &[String]) -> Result<(), String> {
     let mut cfg = Config::load(&paths.state).map_err(|e| e.to_string())?;
     match args.first().map(String::as_str) {
         None | Some("show") => println!("{}", config::redacted_json(&cfg)),
-        Some("keys") => println!("server, token, device_name, quality (mp3|aac|mobile|original), voice, voice_radio_fallback,\ntrack_mode (radio|single), shuffle_artist, duck_level (0.05-1), volume, native_pause,\nsearch_threshold (0.5-1), earcons"),
+        Some("keys") => println!("server, token, device_name, quality (mp3|aac|mobile|original), voice, voice_radio_fallback,\ntrack_mode (radio|single), shuffle_artist, duck_level (0.05-1), volume, native_pause,\nsearch_threshold (0.5-1), earcons, announce (voice|always|off)"),
         Some("set") => {
             let (key, value) = match (args.get(1), args.get(2)) {
                 (Some(k), Some(_)) => (k.as_str(), args[2..].join(" ")),

@@ -1,6 +1,7 @@
 //! Настройки клиента: адрес сервера musik, токен устройства, качество потока, поведение голоса.
 //! Хранятся в `<state-dir>/config.json` с правами 0600 (внутри токен).
 
+use crate::announce::Announce;
 use serde::{Deserialize, Serialize};
 use std::{
     fs, io,
@@ -89,6 +90,8 @@ pub struct Config {
     pub search_threshold: f32,
     /// Звуковые сигналы вместо голосовых ответов: «не нашёл», «лайк».
     pub earcons: bool,
+    /// Алиса называет трек: `off`, `voice` (после голосовой команды) или `always` (каждый трек).
+    pub announce: Announce,
 }
 
 impl Default for Config {
@@ -108,6 +111,7 @@ impl Default for Config {
             native_pause: true,
             search_threshold: 0.72,
             earcons: true,
+            announce: Announce::Voice,
         }
     }
 }
@@ -203,6 +207,7 @@ pub fn set_key(cfg: &mut Config, key: &str, value: &str) -> Result<(), String> {
         "shuffle_artist" => cfg.shuffle_artist = bool_of(value)?,
         "native_pause" => cfg.native_pause = bool_of(value)?,
         "earcons" => cfg.earcons = bool_of(value)?,
+        "announce" => cfg.announce = Announce::parse(value).ok_or("announce: off, voice или always")?,
         "duck_level" => cfg.duck_level = value.trim().parse().map_err(|_| "duck_level: число от 0.05 до 1.0")?,
         "search_threshold" => {
             cfg.search_threshold = value.trim().parse().map_err(|_| "search_threshold: число от 0.5 до 1.0")?
@@ -227,6 +232,7 @@ pub fn redacted_json(cfg: &Config) -> String {
         let tail: String = shown.token.chars().rev().take(4).collect::<Vec<_>>().into_iter().rev().collect();
         shown.token = format!("…{tail}");
     }
+
     serde_json::to_string_pretty(&shown).unwrap_or_default()
 }
 

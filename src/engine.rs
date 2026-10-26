@@ -5,6 +5,7 @@
 
 use crate::{
     alice::{AliceEvent, Native},
+    announce::{self, Announce},
     api::{ApiError, Event, EventResult, MusikApi, PlayRequest, SessionPayload, Track},
     audio::Mixer,
     config::Config,
@@ -115,6 +116,8 @@ pub struct Engine {
     last_progress_ms: u64,
     last_native_pause_ms: u64,
     rng: Rng,
+    /// Следующий начавшийся трек нужно объявить голосом (музыку запустили голосовой командой).
+    announce_next: bool,
 }
 
 /// Повтор загрузки каталога: после успеха редко, после сбоя быстро.
@@ -145,6 +148,7 @@ impl Engine {
             state: State::Idle,
             generation: 0,
             ticket: 0,
+            announce_next: false,
             failures: 0,
             message: String::new(),
             chosen_volume,
@@ -220,6 +224,30 @@ impl Engine {
         });
     }
 
+    /// Алиса называет начавшийся трек, если это включено и уместно.
+    fn announce_track(&mut self) {
+        let wanted = match self.cfg.announce {
+            Announce::Off => false,
+            Announce::Voice => self.announce_next,
+            Announce::Always => true,
+        };
+        self.announce_next = false;
+        if !wanted || !announce::available() {
+            return;
+        }
+        let Some(now) = &self.now else { return };
+        let text = announce::phrase(&now.track);
+        if text.is_empty() {
+            return;
+        }
+        eprintln!("[объявление] {text}");
+        let _ = thread::Builder::new().name("announce".into()).spawn(move || {
+            if let Err(e) = announce::speak(&text) {
+                eprintln!("[объявление] не получилось: {e}");
+            }
+        });
+    }
+
     fn fire_and_forget(&self, event: Event) {
         let api = self.api.clone();
         let _ = thread::Builder::new().name("event".into()).spawn(move || {
@@ -289,6 +317,10 @@ impl Engine {
                     eprintln!("[алиса] распознано «{text}» — голос выключен, пропускаю");
                     return;
                 }
+                if announce::is_echo(&intent::normalize(&text)) {
+                    // Наше же «повтори за мной …» вернулось событием Алисы.
+                    return;
+                }
                 if intent::native_volume_request(&text) {
                     eprintln!("[алиса] распознано «{text}» — громкость, остаётся Алисе");
                     self.guard.native_command();
@@ -334,6 +366,7 @@ impl Engine {
                 if let Some(event) = self.event_for("track_start", None) {
                     self.fire_and_forget(event);
                 }
+                self.announce_track();
             }
             PlayerEvent::Ended { generation, seconds } => {
                 if !self.is_current(generation) {
@@ -501,6 +534,7 @@ impl Engine {
         self.ticket += 1;
         self.failures = 0;
         self.native.prepare_playback(from_voice, self.cfg.native_pause);
+        self.announce_next = from_voice;
         if let Some(now) = &self.now {
             // Закрываем прежний трек как пропущенный, чтобы вкус не терял сигнал.
             if now.started {
@@ -1222,5 +1256,37 @@ mod tests {
         thread::sleep(Duration::from_millis(300));
         assert_eq!(rig.handle.status().unwrap().state, State::Idle, "при выключенном голосе фразы игнорируются");
         assert!(!Config::load(&rig.dir).unwrap().voice);
+    }
+
+    #[test]
+    fn track_is_announced_by_alice_only_after_voice_start() {
+        let dir = std::env::temp_dir().join(format!("musikalice-maind-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let log = dir.join("stdin.txt");
+        let fake = dir.join("maind");
+        std::fs::write(&fake, format!("#!/bin/sh\ncat >> '{}'\n", log.display())).unwrap();
+        std::os::unix::fs::PermissionsExt::set_mode(&mut std::fs::metadata(&fake).unwrap().permissions(), 0o755);
+        std::fs::set_permissions(&fake, std::os::unix::fs::PermissionsExt::from_mode(0o755)).unwrap();
+        // Переменная действует на весь процесс; другие тесты с голосовым запуском тоже допишут сюда — это не мешает.
+        std::env::set_var("MUSIKALICE_MAIND", &fake);
+        let read = || std::fs::read_to_string(&log).unwrap_or_default();
+
+        let rig = Rig::paced();
+        rig.handle.request(Intent::Radio, false).unwrap();
+        rig.wait("играет", |s| s.state == State::Playing);
+        rig.handle.request(Intent::Radio, true).unwrap();
+        let deadline = Instant::now() + Duration::from_secs(6);
+        while !read().contains("x\n") {
+            assert!(Instant::now() < deadline, "объявление не ушло: {:?}", read());
+            thread::sleep(Duration::from_millis(50));
+        }
+        let sent = read();
+        assert!(sent.contains("q\nповтори за мной Radiohead, T"), "{sent:?}");
+        // Эхо нашего запроса не должно превратиться в команду.
+        let prepares = || rig.native.calls.lock().unwrap().iter().filter(|c| c.starts_with("prepare")).count();
+        let before = prepares();
+        rig.say("повтори за мной Radiohead, T1");
+        thread::sleep(Duration::from_millis(200));
+        assert_eq!(prepares(), before, "эхо запустило команду");
     }
 }
