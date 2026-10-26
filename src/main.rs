@@ -115,6 +115,7 @@ musikalice — клиент сервера musik для Яндекс Станц�
   status [--json]           что играет сейчас
   tui                       интерактивный экран
   speak ТЕКСТ               Алиса произносит текст (проверка объявлений, служба не нужна)
+  alice-dump [СЕКУНДЫ]      показать все события Алисы (по умолчанию 20 с; диагностика)
 Прочее:
   version | help
 ";
@@ -160,6 +161,16 @@ fn dispatch(args: &[String], paths: &Paths) -> Result<ExitCode, String> {
                 return Err("что включить? Например: musikalice play Radiohead".into());
             }
             say(paths, &format!("PLAY {}", rest(1).join(" ")))?;
+        }
+        Some("alice-dump") => {
+            let seconds = rest(1).first().and_then(|v| v.parse().ok()).unwrap_or(20u64).clamp(1, 600);
+            let profile = profile::resolve(&profile::selection(&paths.state), Path::new("/"), &paths.base)
+                .map_err(|e| format!("профиль станции: {e}"))?;
+            let address = profile.voice_address().ok_or("в профиле нет голоса Алисы")?;
+            eprintln!("Слушаю {address} {seconds} с. Говорите…");
+            let count = alice::dump_stream(address, seconds, |text| print!("{text}"))
+                .map_err(|e| format!("Алиса на {address}: {e}"))?;
+            eprintln!("кадров: {count}");
         }
         Some("speak") => {
             if rest(1).is_empty() {

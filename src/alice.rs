@@ -96,6 +96,96 @@ fn number(data: &[u8], field_number: u64) -> Option<u64> {
     }
 }
 
+/// Все поля сообщения подряд; `None`, если разметка не похожа на protobuf.
+fn fields(data: &[u8]) -> Option<Vec<(u64, Value<'_>)>> {
+    let mut out = Vec::new();
+    let mut offset = 0;
+    while offset < data.len() {
+        let key = varint(data, &mut offset)?;
+        if key >> 3 == 0 {
+            return None;
+        }
+        let value = match key & 7 {
+            0 => Value::Number(varint(data, &mut offset)?),
+            2 => {
+                let len = usize::try_from(varint(data, &mut offset)?).ok()?;
+                let end = offset.checked_add(len)?;
+                let bytes = data.get(offset..end)?;
+                offset = end;
+                Value::Bytes(bytes)
+            }
+            1 | 5 => {
+                let len = if key & 7 == 1 { 8 } else { 4 };
+                let end = offset.checked_add(len)?;
+                let raw = data.get(offset..end)?;
+                offset = end;
+                Value::Bytes(raw)
+            }
+            _ => return None,
+        };
+        out.push((key >> 3, value));
+    }
+    Some(out)
+}
+
+/// Читаемый разбор кадра без схемы: номера полей, числа, строки и вложенные сообщения. Для диагностики.
+pub fn dump(data: &[u8]) -> String {
+    fn walk(data: &[u8], depth: usize, out: &mut String) {
+        let Some(list) = fields(data) else {
+            out.push_str(&format!("{}<{} байт>\n", "  ".repeat(depth), data.len()));
+            return;
+        };
+        for (number, value) in list {
+            let pad = "  ".repeat(depth);
+            match value {
+                Value::Number(v) => out.push_str(&format!("{pad}{number}: {v}\n")),
+                Value::Bytes(b) => {
+                    let text = std::str::from_utf8(b)
+                        .ok()
+                        .filter(|t| !t.is_empty() && t.chars().all(|c| !c.is_control() || c == '\n' || c == '\t'));
+                    match text {
+                        Some(t) if depth >= 12 || fields(b).is_none() || !t.is_ascii() => {
+                            out.push_str(&format!("{pad}{number}: «{}»\n", t.chars().take(300).collect::<String>()))
+                        }
+                        _ if b.is_empty() => out.push_str(&format!("{pad}{number}: {{}}\n")),
+                        _ if depth < 12 && fields(b).is_some() => {
+                            out.push_str(&format!("{pad}{number} {{\n"));
+                            walk(b, depth + 1, out);
+                            out.push_str(&format!("{pad}}}\n"));
+                        }
+                        Some(t) => out.push_str(&format!("{pad}{number}: «{t}»\n")),
+                        None => out.push_str(&format!("{pad}{number}: <{} байт>\n", b.len())),
+                    }
+                }
+            }
+        }
+    }
+    let mut out = String::new();
+    walk(data, 0, &mut out);
+    out
+}
+
+/// Печатает все кадры Алисы `seconds` секунд подряд (команда `musikalice alice-dump`).
+pub fn dump_stream(address: SocketAddr, seconds: u64, mut print: impl FnMut(&str)) -> io::Result<usize> {
+    let mut socket = TcpStream::connect_timeout(&address, Duration::from_secs(2))?;
+    socket.set_read_timeout(Some(Duration::from_millis(300)))?;
+    let started = std::time::Instant::now();
+    let mut reader = FrameReader::default();
+    let mut count = 0;
+    while started.elapsed() < Duration::from_secs(seconds) {
+        if let Some(frame) = reader.poll(&mut socket)? {
+            count += 1;
+            print(&format!(
+                "--- кадр {count}, {:.1} с, {} байт\n{}",
+                started.elapsed().as_secs_f32(),
+                frame.len(),
+                dump(&frame)
+            ));
+        }
+    }
+    Ok(count)
+}
+
 /// `Some(true)` — Алиса слушает/думает/говорит; `Some(false)` — ждёт; `None` — это не состояние Алисы.
 pub fn alice_busy(data: &[u8]) -> Option<bool> {
     if number(data, 253) != Some(TYPE_ALICE_STATE) {
@@ -588,5 +678,20 @@ mod tests {
             capabilities.push(String::from_utf8(bytes(&remoting, 7).unwrap().to_vec()).unwrap());
         }
         assert_eq!(capabilities, ["AliceCapability", "PlaybackControlCapability"]);
+    }
+
+    #[test]
+    fn dump_shows_nested_text_and_numbers() {
+        let mut inner = Vec::new();
+        put_bytes(&mut inner, 1, "дальше".as_bytes());
+        put_number(&mut inner, 2, 1);
+        let mut msg = Vec::new();
+        put_bytes(&mut msg, 7, &inner);
+        put_number(&mut msg, 253, 42);
+        let text = dump(&msg);
+        assert!(text.contains("7 {"), "{text}");
+        assert!(text.contains("1: «дальше»"), "{text}");
+        assert!(text.contains("253: 42"), "{text}");
+        assert!(dump(&[0xff, 0xff]).contains("<2 байт>"));
     }
 }
