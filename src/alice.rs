@@ -206,6 +206,8 @@ fn send_native(address: SocketAddr, frame: &[u8]) -> io::Result<()> {
 pub trait Native: Send + Sync {
     /// Отменить текущий диалог (если фраза пришла голосом) и, если `pause`, поставить штатный плеер на паузу.
     fn prepare_playback(&self, from_voice: bool, pause: bool);
+    /// Повторная пауза штатного плеера: Алиса может запустить свою музыку уже после диалога.
+    fn pause_native(&self);
 }
 
 pub struct NativeClient {
@@ -229,12 +231,19 @@ impl Native for NativeClient {
             }
         });
     }
+    fn pause_native(&self) {
+        let address = self.address;
+        let _ = thread::Builder::new().name("alice-pause".into()).stack_size(128 * 1024).spawn(move || {
+            let _ = send_native(address, &pause_frame(&uuid_like()));
+        });
+    }
 }
 
 /// Заглушка для профилей без голоса.
 pub struct NoNative;
 impl Native for NoNative {
     fn prepare_playback(&self, _from_voice: bool, _pause: bool) {}
+    fn pause_native(&self) {}
 }
 
 // ---------------------------------------------------------------- чтение событий

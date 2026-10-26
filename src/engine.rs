@@ -113,6 +113,7 @@ pub struct Engine {
     origin: Instant,
     next_library_ms: u64,
     last_progress_ms: u64,
+    last_native_pause_ms: u64,
     rng: Rng,
 }
 
@@ -120,6 +121,7 @@ pub struct Engine {
 const LIBRARY_REFRESH_MS: u64 = 30 * 60_000;
 const LIBRARY_RETRY_MS: u64 = 30_000;
 const PROGRESS_MS: u64 = 30_000;
+const NATIVE_PAUSE_MS: u64 = 500;
 const MAX_FAILURES: u32 = 3;
 
 impl Engine {
@@ -150,6 +152,7 @@ impl Engine {
             origin: Instant::now(),
             next_library_ms: 0,
             last_progress_ms: 0,
+            last_native_pause_ms: 0,
             rng: Rng::new(),
         }
     }
@@ -255,6 +258,12 @@ impl Engine {
             }
             None => {}
         }
+        // Пока играет musik, штатный плеер Алисы держим на паузе: она запускает свою музыку с задержкой,
+        // уже после диалога, и одного нажатия при команде не хватает.
+        if self.cfg.native_pause && self.state == State::Playing && now >= self.last_native_pause_ms + NATIVE_PAUSE_MS {
+            self.last_native_pause_ms = now;
+            self.native.pause_native();
+        }
         if self.state == State::Playing && now >= self.last_progress_ms + PROGRESS_MS {
             self.last_progress_ms = now;
             if let Some(event) = self.event_for("progress", None) {
@@ -268,7 +277,9 @@ impl Engine {
     fn on_alice(&mut self, event: AliceEvent) {
         match event {
             AliceEvent::Busy(busy) => {
-                eprintln!("[алиса] диалог: {}", if busy { "идёт" } else { "закончился" });
+                if busy != self.busy {
+                    eprintln!("[алиса] диалог: {}", if busy { "идёт" } else { "закончился" });
+                }
                 self.busy = busy;
                 self.ducking.set_busy(busy);
                 self.guard.activity(busy, self.now_ms());
@@ -904,6 +915,9 @@ mod tests {
         fn prepare_playback(&self, from_voice: bool, pause: bool) {
             self.calls.lock().unwrap().push(format!("prepare:{from_voice}:{pause}"));
         }
+        fn pause_native(&self) {
+            self.calls.lock().unwrap().push("pause".into());
+        }
     }
 
     struct Rig {
@@ -916,13 +930,23 @@ mod tests {
 
     impl Rig {
         fn new() -> Self {
+            Self::build(false)
+        }
+
+        /// Вывод идёт в реальном времени: трек длится столько, сколько звучит.
+        fn paced() -> Self {
+            Self::build(true)
+        }
+
+        fn build(paced: bool) -> Self {
             let server = FakeServer::start(handler);
             let dir = std::env::temp_dir().join(format!("musikalice-engine-{}-{}", std::process::id(), new_event_id()));
             let config = Config { server: server.url(), token: "tok".into(), earcons: false, ..Config::default() };
             let api = Arc::new(HttpApi::new(&config.server, &config.token, "Кухня"));
             let native = Arc::new(FakeNative::default());
             let mixer = Arc::new(NullMixer::new(50));
-            let output = Box::new(NullOutput::new(44100, Arc::new(Mutex::new(Vec::new()))));
+            let sink = Arc::new(Mutex::new(Vec::new()));
+            let output = Box::new(if paced { NullOutput::paced(44100, sink) } else { NullOutput::new(44100, sink) });
             let handle = launch(config, dir.clone(), api, output, native.clone(), mixer.clone());
             Self { server, handle, native, mixer, dir }
         }
@@ -1093,6 +1117,22 @@ mod tests {
         rig.say("включи музыку");
         thread::sleep(Duration::from_millis(300));
         assert_eq!(rig.handle.status().unwrap().state, State::Idle);
+    }
+
+    #[test]
+    fn native_player_is_kept_paused_only_while_musik_plays() {
+        let rig = Rig::paced();
+        let pauses = |rig: &Rig| rig.native.calls.lock().unwrap().iter().filter(|c| *c == "pause").count();
+        rig.handle.request(Intent::Radio, true).unwrap();
+        rig.wait("играет", |s| s.state == State::Playing);
+        thread::sleep(Duration::from_millis(1300));
+        assert!(pauses(&rig) >= 2, "паузу штатного плеера надо повторять, было {}", pauses(&rig));
+        // На паузе musik Алиса свободна: повторять больше не нужно.
+        rig.handle.request(Intent::Pause, false).unwrap();
+        thread::sleep(Duration::from_millis(300));
+        let settled = pauses(&rig);
+        thread::sleep(Duration::from_millis(1100));
+        assert_eq!(pauses(&rig), settled);
     }
 
     #[test]
