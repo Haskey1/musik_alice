@@ -400,7 +400,13 @@ impl FrameReader {
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum AliceEvent {
     Busy(bool),
-    Recognized { text: String },
+    Recognized {
+        text: String,
+    },
+    /// Короткая фраза без «Алиса», услышанная командным спотером прошивки (см. `spotter`).
+    Spotted {
+        text: String,
+    },
 }
 
 /// Разбирает кадры и вызывает `emit`. Повторные кадры одного запроса отбрасываются.

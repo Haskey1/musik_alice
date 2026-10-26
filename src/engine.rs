@@ -122,6 +122,9 @@ pub struct Engine {
     rng: Rng,
     /// Следующий начавшийся трек нужно объявить голосом (музыку запустили голосовой командой).
     announce_next: bool,
+    /// Последняя транспортная команда голосом и когда: короткая команда из журнала и тот же запрос Алисы
+    /// («стоп» приходит обоими путями) не должны сработать дважды.
+    last_transport: Option<(Intent, u64)>,
 }
 
 /// Повтор загрузки каталога: после успеха редко, после сбоя быстро.
@@ -153,6 +156,7 @@ impl Engine {
             generation: 0,
             ticket: 0,
             announce_next: false,
+            last_transport: None,
             failures: 0,
             message: String::new(),
             chosen_volume,
@@ -357,12 +361,55 @@ impl Engine {
                         return;
                     }
                 }
+                if self.transport_duplicate(&parsed) {
+                    eprintln!("[алиса] распознано «{text}» — уже выполнено по короткой команде");
+                    return;
+                }
                 eprintln!("[алиса] распознано «{text}» → {parsed}");
                 let reply = self.command(parsed, true);
                 eprintln!("[алиса] ответ: {reply}");
                 self.message = reply;
             }
+            AliceEvent::Spotted { text } => {
+                if !self.cfg.voice || !self.cfg.quick_commands {
+                    return;
+                }
+                let parsed = intent::from_speech(&text);
+                let Some(parsed) =
+                    parsed.filter(|p| matches!(p, Intent::Next | Intent::Previous | Intent::Pause | Intent::Resume))
+                else {
+                    return;
+                };
+                if self.session.is_none() {
+                    eprintln!("[алиса] без обращения «{text}» — musik не играет, остаётся Алисе");
+                    return;
+                }
+                if matches!(parsed, Intent::Resume) && self.state != State::Paused {
+                    return;
+                }
+                if self.transport_duplicate(&parsed) {
+                    return;
+                }
+                eprintln!("[алиса] без обращения «{text}» → {parsed}");
+                // Диалога нет — отменять у Алисы нечего.
+                self.message = self.command(parsed, false);
+            }
         }
+    }
+
+    /// Та же транспортная команда меньше чем через 2,5 с — повтор одной фразы, пришедшей двумя путями.
+    fn transport_duplicate(&mut self, intent: &Intent) -> bool {
+        if !matches!(intent, Intent::Next | Intent::Previous | Intent::Pause | Intent::Resume | Intent::Toggle) {
+            return false;
+        }
+        let now = self.now_ms();
+        if let Some((last, at)) = &self.last_transport {
+            if last == intent && now.saturating_sub(*at) < 2500 {
+                return true;
+            }
+        }
+        self.last_transport = Some((intent.clone(), now));
+        false
     }
 
     // ------------------------------------------------------------ плеер
@@ -1318,5 +1365,30 @@ mod tests {
         rig.say("повтори за мной Radiohead, T1");
         thread::sleep(Duration::from_millis(200));
         assert_eq!(prepares(), before, "эхо запустило команду");
+    }
+
+    #[test]
+    fn quick_next_without_alice_works_once_even_if_alice_repeats_it() {
+        let rig = Rig::paced();
+        rig.handle.request(Intent::Radio, false).unwrap();
+        rig.wait("играет", |s| s.state == State::Playing && s.title == "T1");
+        rig.handle.tx.send(Msg::Alice(AliceEvent::Spotted { text: "дальше".into() })).unwrap();
+        rig.wait("следующий", |s| s.title == "T2");
+        // Тот же «дальше» пришёл ещё и запросом Алисы — второй раз не переключаем.
+        rig.say("дальше");
+        thread::sleep(Duration::from_millis(300));
+        let skips = rig
+            .server
+            .requests()
+            .iter()
+            .filter(|r| r.path == "/api/events" && String::from_utf8_lossy(&r.body).contains("\"skip\""))
+            .count();
+        assert_eq!(skips, 1);
+        // Посторонние фразы спотера и фразы без musik ничего не делают.
+        rig.handle.tx.send(Msg::Alice(AliceEvent::Spotted { text: "громче".into() })).unwrap();
+        rig.handle.request(Intent::Release, false).unwrap();
+        rig.handle.tx.send(Msg::Alice(AliceEvent::Spotted { text: "назад".into() })).unwrap();
+        thread::sleep(Duration::from_millis(300));
+        assert_eq!(rig.handle.status().unwrap().state, State::Idle);
     }
 }

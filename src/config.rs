@@ -97,6 +97,8 @@ pub struct Config {
     pub display: Display,
     /// Кнопки, кольцо и часы Мини 2 под управлением musik, пока он играет.
     pub buttons: bool,
+    /// «Дальше»/«назад» без «Алиса», пока играет musik (по журналу прошивки).
+    pub quick_commands: bool,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
@@ -136,6 +138,7 @@ impl Default for Config {
             announce: Announce::Off,
             display: Display::Clock,
             buttons: true,
+            quick_commands: true,
         }
     }
 }
@@ -233,6 +236,7 @@ pub fn set_key(cfg: &mut Config, key: &str, value: &str) -> Result<(), String> {
         "earcons" => cfg.earcons = bool_of(value)?,
         "display" => cfg.display = Display::parse(value).ok_or("display: clock или position")?,
         "buttons" => cfg.buttons = bool_of(value)?,
+        "quick_commands" => cfg.quick_commands = bool_of(value)?,
         "announce" => cfg.announce = Announce::parse(value).ok_or("announce: off, voice или always")?,
         "duck_level" => cfg.duck_level = value.trim().parse().map_err(|_| "duck_level: число от 0.05 до 1.0")?,
         "search_threshold" => {

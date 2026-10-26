@@ -17,6 +17,7 @@ mod intent;
 mod player;
 mod profile;
 mod search;
+mod spotter;
 mod supervisor;
 #[cfg(test)]
 mod testutil;
@@ -259,6 +260,18 @@ fn run_service(paths: &Paths) -> Result<ExitCode, String> {
             })
             .map_err(|e| e.to_string())?;
         log(&format!("слушаю Алису на {address}"));
+        let tx = handle.tx.clone();
+        let stop = alice_stop.clone();
+        let path = spotter::log_path();
+        log(&format!("короткие команды без «Алиса»: журнал {}", path.display()));
+        std::thread::Builder::new()
+            .name("spotter".into())
+            .spawn(move || {
+                spotter::watch(path, stop, move |text| {
+                    let _ = tx.send(engine::Msg::Alice(alice::AliceEvent::Spotted { text }));
+                })
+            })
+            .map_err(|e| e.to_string())?;
     } else {
         log("профиль без голоса: управление только через консоль");
     }
@@ -403,7 +416,7 @@ fn config_command(paths: &Paths, args: &[String]) -> Result<(), String> {
     let mut cfg = Config::load(&paths.state).map_err(|e| e.to_string())?;
     match args.first().map(String::as_str) {
         None | Some("show") => println!("{}", config::redacted_json(&cfg)),
-        Some("keys") => println!("server, token, device_name, quality (mp3|aac|mobile|original), voice, voice_radio_fallback,\ntrack_mode (radio|single), shuffle_artist, duck_level (0.05-1), volume, native_pause,\nsearch_threshold (0.5-1), earcons, announce (off|voice|always),\ndisplay (clock|position), buttons"),
+        Some("keys") => println!("server, token, device_name, quality (mp3|aac|mobile|original), voice, voice_radio_fallback,\ntrack_mode (radio|single), shuffle_artist, duck_level (0.05-1), volume, native_pause,\nsearch_threshold (0.5-1), earcons, announce (off|voice|always),\ndisplay (clock|position), buttons, quick_commands"),
         Some("set") => {
             let (key, value) = match (args.get(1), args.get(2)) {
                 (Some(k), Some(_)) => (k.as_str(), args[2..].join(" ")),
