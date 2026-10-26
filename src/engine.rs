@@ -66,6 +66,10 @@ pub struct Status {
     pub library: usize,
     pub message: String,
     pub server: String,
+    /// Что показывать на часах Мини 2.
+    pub display: crate::config::Display,
+    /// Отдавать ли кнопки станции под управление musik.
+    pub buttons: bool,
 }
 
 struct Session {
@@ -237,7 +241,15 @@ impl Engine {
         }
         let Some(now) = &self.now else { return };
         let text = announce::phrase(&now.track);
-        if text.is_empty() {
+        if !text.is_empty() {
+            self.speak(text);
+        }
+    }
+
+    /// Просит Алису произнести фразу её голосом (в отдельном потоке: это занимает пару секунд).
+    fn speak(&self, text: String) {
+        if !announce::available() {
+            eprintln!("[объявление] консоль Алисы не найдена, «{text}» не произнесено");
             return;
         }
         eprintln!("[объявление] {text}");
@@ -520,6 +532,17 @@ impl Engine {
                 self.player.stop();
                 "Колонка свободна для Алисы".into()
             }
+            Intent::WhatsPlaying => match self.now.as_ref().map(|n| announce::phrase(&n.track)) {
+                Some(text) if !text.is_empty() => {
+                    if from_voice {
+                        // Свой ответ Алисы («не знаю, что играет») обрываем и отвечаем её же голосом.
+                        self.native.cancel();
+                        self.speak(text.clone());
+                    }
+                    format!("Играет: {text}")
+                }
+                _ => "Сейчас ничего не играет".into(),
+            },
             Intent::Retry => {
                 self.next_library_ms = 0;
                 "Обновляю каталог".into()
@@ -795,6 +818,8 @@ impl Engine {
             library: self.catalog.len(),
             message: self.message.clone(),
             server: self.cfg.server.clone(),
+            display: self.cfg.display,
+            buttons: self.cfg.buttons,
         }
     }
 }
@@ -951,6 +976,9 @@ mod tests {
         }
         fn pause_native(&self) {
             self.calls.lock().unwrap().push("pause".into());
+        }
+        fn cancel(&self) {
+            self.calls.lock().unwrap().push("cancel".into());
         }
     }
 
@@ -1259,29 +1287,31 @@ mod tests {
     }
 
     #[test]
-    fn track_is_announced_by_alice_only_after_voice_start() {
+    fn whats_playing_is_answered_in_alices_voice() {
         let dir = std::env::temp_dir().join(format!("musikalice-maind-{}", std::process::id()));
         std::fs::create_dir_all(&dir).unwrap();
         let log = dir.join("stdin.txt");
         let fake = dir.join("maind");
         std::fs::write(&fake, format!("#!/bin/sh\ncat >> '{}'\n", log.display())).unwrap();
-        std::os::unix::fs::PermissionsExt::set_mode(&mut std::fs::metadata(&fake).unwrap().permissions(), 0o755);
         std::fs::set_permissions(&fake, std::os::unix::fs::PermissionsExt::from_mode(0o755)).unwrap();
-        // Переменная действует на весь процесс; другие тесты с голосовым запуском тоже допишут сюда — это не мешает.
+        // Переменная действует на весь процесс; в остальных тестах объявления выключены.
         std::env::set_var("MUSIKALICE_MAIND", &fake);
         let read = || std::fs::read_to_string(&log).unwrap_or_default();
 
         let rig = Rig::paced();
-        rig.handle.request(Intent::Radio, false).unwrap();
-        rig.wait("играет", |s| s.state == State::Playing);
+        // Без вопроса Алиса молчит, даже при голосовом запуске (announce = off).
         rig.handle.request(Intent::Radio, true).unwrap();
+        rig.wait("играет", |s| s.state == State::Playing);
+        rig.say("Алиса, что сейчас играет?");
         let deadline = Instant::now() + Duration::from_secs(6);
         while !read().contains("x\n") {
-            assert!(Instant::now() < deadline, "объявление не ушло: {:?}", read());
+            assert!(Instant::now() < deadline, "ответ не ушёл: {:?}", read());
             thread::sleep(Duration::from_millis(50));
         }
         let sent = read();
+        assert_eq!(sent.matches("повтори за мной").count(), 1, "{sent:?}");
         assert!(sent.contains("q\nповтори за мной Radiohead, T"), "{sent:?}");
+        assert!(rig.native.calls.lock().unwrap().contains(&"cancel".to_string()), "свой ответ Алисы надо оборвать");
         // Эхо нашего запроса не должно превратиться в команду.
         let prepares = || rig.native.calls.lock().unwrap().iter().filter(|c| c.starts_with("prepare")).count();
         let before = prepares();

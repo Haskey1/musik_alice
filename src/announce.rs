@@ -31,9 +31,9 @@ const MAX_CHARS: usize = 120;
 #[derive(Clone, Copy, Debug, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 #[serde(rename_all = "lowercase")]
 pub enum Announce {
-    /// Никогда.
+    /// Только по вопросу «что играет» (по умолчанию).
     Off,
-    /// Когда музыку запустили голосом (по умолчанию).
+    /// Ещё и при запуске музыки голосом.
     Voice,
     /// Каждый новый трек.
     Always,
@@ -111,6 +111,16 @@ pub fn speak(text: &str) -> Result<(), String> {
     if text.is_empty() {
         return Ok(());
     }
+    console(&format!("q\n{PREFIX} {text}\n"), SEND_WAIT)
+}
+
+/// Алиса начинает слушать, как после «Алиса» (команда `s` консоли).
+pub fn listen() -> Result<(), String> {
+    console("s\n", Duration::from_millis(500))
+}
+
+/// Запускает консоль, печатает `input` после подключения, держит `hold` и выходит.
+fn console(input: &str, hold: Duration) -> Result<(), String> {
     let program = program();
     let mut child = Command::new(&program)
         .arg("--cli")
@@ -122,8 +132,8 @@ pub fn speak(text: &str) -> Result<(), String> {
         .map_err(|e| format!("не запустить {}: {e}", program.display()))?;
     let mut stdin = child.stdin.take().ok_or("нет stdin у консоли")?;
     thread::sleep(CONNECT_WAIT);
-    let sent = stdin.write_all(format!("q\n{PREFIX} {text}\n").as_bytes()).and_then(|_| stdin.flush());
-    thread::sleep(SEND_WAIT);
+    let sent = stdin.write_all(input.as_bytes()).and_then(|_| stdin.flush());
+    thread::sleep(hold);
     let _ = stdin.write_all(b"x\n");
     drop(stdin);
     let deadline = Instant::now() + EXIT_WAIT;

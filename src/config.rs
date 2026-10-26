@@ -90,8 +90,30 @@ pub struct Config {
     pub search_threshold: f32,
     /// Звуковые сигналы вместо голосовых ответов: «не нашёл», «лайк».
     pub earcons: bool,
-    /// Алиса называет трек: `off`, `voice` (после голосовой команды) или `always` (каждый трек).
+    /// Алиса сама называет трек при запуске: `off` (по умолчанию; трек называется по «что играет»),
+    /// `voice` — после голосовой команды, `always` — каждый трек.
     pub announce: Announce,
+    /// Часы Мини 2 пока играет musik: `clock` — время суток, `position` — время трека.
+    pub display: Display,
+    /// Кнопки, кольцо и часы Мини 2 под управлением musik, пока он играет.
+    pub buttons: bool,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum Display {
+    Clock,
+    Position,
+}
+
+impl Display {
+    pub fn parse(raw: &str) -> Option<Self> {
+        match raw.trim().to_lowercase().as_str() {
+            "clock" | "часы" | "время" => Some(Self::Clock),
+            "position" | "track" | "трек" => Some(Self::Position),
+            _ => None,
+        }
+    }
 }
 
 impl Default for Config {
@@ -111,7 +133,9 @@ impl Default for Config {
             native_pause: true,
             search_threshold: 0.72,
             earcons: true,
-            announce: Announce::Voice,
+            announce: Announce::Off,
+            display: Display::Clock,
+            buttons: true,
         }
     }
 }
@@ -207,6 +231,8 @@ pub fn set_key(cfg: &mut Config, key: &str, value: &str) -> Result<(), String> {
         "shuffle_artist" => cfg.shuffle_artist = bool_of(value)?,
         "native_pause" => cfg.native_pause = bool_of(value)?,
         "earcons" => cfg.earcons = bool_of(value)?,
+        "display" => cfg.display = Display::parse(value).ok_or("display: clock или position")?,
+        "buttons" => cfg.buttons = bool_of(value)?,
         "announce" => cfg.announce = Announce::parse(value).ok_or("announce: off, voice или always")?,
         "duck_level" => cfg.duck_level = value.trim().parse().map_err(|_| "duck_level: число от 0.05 до 1.0")?,
         "search_threshold" => {

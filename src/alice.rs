@@ -208,6 +208,8 @@ pub trait Native: Send + Sync {
     fn prepare_playback(&self, from_voice: bool, pause: bool);
     /// Повторная пауза штатного плеера: Алиса может запустить свою музыку уже после диалога.
     fn pause_native(&self);
+    /// Прервать текущий ответ Алисы (когда на фразу отвечаем мы).
+    fn cancel(&self);
 }
 
 pub struct NativeClient {
@@ -237,6 +239,12 @@ impl Native for NativeClient {
             let _ = send_native(address, &pause_frame(&uuid_like()));
         });
     }
+    fn cancel(&self) {
+        let address = self.address;
+        let _ = thread::Builder::new().name("alice-cancel".into()).stack_size(128 * 1024).spawn(move || {
+            let _ = send_native(address, &cancel_frame());
+        });
+    }
 }
 
 /// Заглушка для профилей без голоса.
@@ -244,6 +252,7 @@ pub struct NoNative;
 impl Native for NoNative {
     fn prepare_playback(&self, _from_voice: bool, _pause: bool) {}
     fn pause_native(&self) {}
+    fn cancel(&self) {}
 }
 
 // ---------------------------------------------------------------- чтение событий

@@ -36,6 +36,8 @@ pub enum Intent {
     Like,
     Dislike,
     Voice(bool),
+    /// «Что играет?» — Алиса называет текущий трек.
+    WhatsPlaying,
     /// Освободить колонку для штатной музыки Алисы.
     Release,
     Retry,
@@ -56,6 +58,7 @@ impl fmt::Display for Intent {
             Intent::Like => write!(f, "like"),
             Intent::Dislike => write!(f, "dislike"),
             Intent::Voice(on) => write!(f, "voice {}", if *on { "on" } else { "off" }),
+            Intent::WhatsPlaying => write!(f, "what's playing"),
             Intent::Release => write!(f, "release"),
             Intent::Retry => write!(f, "retry"),
         }
@@ -68,7 +71,13 @@ impl Intent {
     pub fn needs_active_session(&self) -> bool {
         matches!(
             self,
-            Intent::Pause | Intent::Next | Intent::Previous | Intent::Toggle | Intent::Like | Intent::Dislike
+            Intent::Pause
+                | Intent::Next
+                | Intent::Previous
+                | Intent::Toggle
+                | Intent::Like
+                | Intent::Dislike
+                | Intent::WhatsPlaying
         )
     }
 }
@@ -85,6 +94,36 @@ pub fn normalize(text: &str) -> String {
     }
     joined
 }
+
+const WHATS_PLAYING: &[&str] = &[
+    "что играет",
+    "что сейчас играет",
+    "что это играет",
+    "что у нас играет",
+    "что за песня",
+    "что за трек",
+    "что за музыка",
+    "что это за песня",
+    "что это за трек",
+    "что это за музыка",
+    "какая песня играет",
+    "какая сейчас песня",
+    "какая это песня",
+    "какой трек играет",
+    "какой сейчас трек",
+    "какой это трек",
+    "как называется песня",
+    "как называется эта песня",
+    "как называется трек",
+    "как называется этот трек",
+    "кто поет",
+    "кто это поет",
+    "кто сейчас поет",
+    "кто исполняет",
+    "кто исполнитель",
+    "назови трек",
+    "назови песню",
+];
 
 const PAUSE: &[&str] = &[
     "стоп",
@@ -264,6 +303,9 @@ pub fn from_speech(text: &str) -> Option<Intent> {
     let text = normalize(text);
     if text.is_empty() || text.len() > 512 {
         return None;
+    }
+    if WHATS_PLAYING.contains(&text.as_str()) {
+        return Some(Intent::WhatsPlaying);
     }
     if PAUSE.contains(&text.as_str()) {
         return Some(Intent::Pause);
@@ -497,5 +539,19 @@ mod tests {
         assert!(Intent::Like.needs_active_session());
         assert!(!Intent::Radio.needs_active_session());
         assert!(!Intent::Resume.needs_active_session());
+        assert!(Intent::WhatsPlaying.needs_active_session());
+    }
+
+    #[test]
+    fn whats_playing_phrases() {
+        for phrase in ["Алиса, что играет?", "что сейчас играет", "как называется эта песня", "Кто поёт?"]
+        {
+            assert_eq!(from_speech(phrase), Some(Intent::WhatsPlaying), "{phrase}");
+        }
+        // «что играет» не превращается в запрос «включи …».
+        assert_eq!(
+            from_speech("включи что играет"),
+            Some(Intent::Play(Query { text: "что играет".into(), kind: None }))
+        );
     }
 }

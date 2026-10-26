@@ -8,6 +8,7 @@ mod api;
 mod audio;
 mod config;
 mod control;
+mod controls;
 mod decode;
 mod ducking;
 mod earcon;
@@ -251,6 +252,18 @@ fn run_service(paths: &Paths) -> Result<ExitCode, String> {
         log("профиль без голоса: управление только через консоль");
     }
 
+    let controls_stop = Arc::new(AtomicBool::new(false));
+    let controls_thread = match controls::Settings::from_profile(profile.controls.as_ref()) {
+        Some(settings) => {
+            let remote: Arc<dyn controls::Remote> = handle.clone();
+            controls::spawn(settings, remote, controls_stop.clone())
+        }
+        None => {
+            log("кнопки и светодиоды: профиль их не описывает");
+            None
+        }
+    };
+
     let (quit_tx, quit_rx) = mpsc::channel();
     let _server = control::Server::start(&paths.control, handle.clone(), paths.state.clone(), quit_tx)
         .map_err(|e| format!("управляющий сокет {}: {e}", paths.control.display()))?;
@@ -262,6 +275,11 @@ fn run_service(paths: &Paths) -> Result<ExitCode, String> {
     }
     log("останавливаюсь");
     alice_stop.store(true, Ordering::Relaxed);
+    controls_stop.store(true, Ordering::Relaxed);
+    // Поток кнопок отпускает устройство ввода и возвращает часы; он держит ссылку на движок.
+    if let Some(thread) = controls_thread {
+        let _ = thread.join();
+    }
     if let Ok(handle) = Arc::try_unwrap(handle) {
         handle.shutdown();
     }
@@ -374,7 +392,7 @@ fn config_command(paths: &Paths, args: &[String]) -> Result<(), String> {
     let mut cfg = Config::load(&paths.state).map_err(|e| e.to_string())?;
     match args.first().map(String::as_str) {
         None | Some("show") => println!("{}", config::redacted_json(&cfg)),
-        Some("keys") => println!("server, token, device_name, quality (mp3|aac|mobile|original), voice, voice_radio_fallback,\ntrack_mode (radio|single), shuffle_artist, duck_level (0.05-1), volume, native_pause,\nsearch_threshold (0.5-1), earcons, announce (voice|always|off)"),
+        Some("keys") => println!("server, token, device_name, quality (mp3|aac|mobile|original), voice, voice_radio_fallback,\ntrack_mode (radio|single), shuffle_artist, duck_level (0.05-1), volume, native_pause,\nsearch_threshold (0.5-1), earcons, announce (off|voice|always),\ndisplay (clock|position), buttons"),
         Some("set") => {
             let (key, value) = match (args.get(1), args.get(2)) {
                 (Some(k), Some(_)) => (k.as_str(), args[2..].join(" ")),

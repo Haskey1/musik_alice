@@ -14,5 +14,16 @@
     "protocol": "quasar",
     "address": "127.0.0.1:9875"
   },
-  "controls": null
+  "controls": {
+    "driver": "mini2",
+    "input_device": "/dev/input/event0",
+    "input_name": "sar0_pad0",
+    "keys": {
+      "alice": 582,
+      "volume_up": 115,
+      "volume_down": 114
+    },
+    "ring_prefix": "/sys/class/leds/mini2:",
+    "display_prefix": "/sys/class/leds/mini2:white:clock"
+  }
 }
