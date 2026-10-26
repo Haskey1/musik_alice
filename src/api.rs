@@ -144,6 +144,8 @@ pub trait MusikApi: Send + Sync {
     fn favorite_add(&self, track_id: i64) -> Result<(), ApiError>;
     /// Проверка токена: `GET /api/auth/me`.
     fn auth_ok(&self) -> Result<bool, ApiError>;
+    /// Применяет новые адрес, токен и имя устройства (после `login` или `config set`).
+    fn configure(&self, server: &str, token: &str, device_name: &str);
 }
 
 /// Открытый поток аудио.
@@ -159,10 +161,29 @@ pub trait Fetcher: Send + Sync {
 pub struct HttpApi {
     agent: ureq::Agent,
     stream_agent: ureq::Agent,
+    /// Меняется на лету: после `login` служба получает новые адрес и токен без перезапуска.
+    settings: std::sync::RwLock<Settings>,
+}
+
+#[derive(Clone)]
+struct Settings {
     base: String,
     token: String,
     device_id: String,
     client_id: String,
+}
+
+impl Settings {
+    fn new(server: &str, token: &str, device_name: &str) -> Self {
+        let device_id =
+            if device_name.is_empty() { "Яндекс Станция".to_owned() } else { device_name.to_owned() };
+        Self {
+            base: server.trim_end_matches('/').to_owned(),
+            token: token.to_owned(),
+            client_id: format!("musik-alice:{device_id}"),
+            device_id,
+        }
+    }
 }
 
 fn agent(read: Duration) -> ureq::Agent {
@@ -199,28 +220,25 @@ fn parse<T: for<'de> Deserialize<'de>>(response: ureq::Response) -> Result<T, Ap
 
 impl HttpApi {
     pub fn new(server: &str, token: &str, device_name: &str) -> Self {
-        let device_id =
-            if device_name.is_empty() { "Яндекс Станция".to_owned() } else { device_name.to_owned() };
         Self {
             agent: agent(Duration::from_secs(20)),
             stream_agent: agent(Duration::from_secs(20)),
-            base: server.trim_end_matches('/').to_owned(),
-            token: token.to_owned(),
-            client_id: format!("musik-alice:{device_id}"),
-            device_id,
+            settings: std::sync::RwLock::new(Settings::new(server, token, device_name)),
         }
     }
 
-    fn url(&self, path: &str) -> String {
-        format!("{}{}", self.base, path)
+    fn settings(&self) -> Settings {
+        self.settings.read().unwrap_or_else(|e| e.into_inner()).clone()
     }
 
     fn get(&self, path: &str) -> ureq::Request {
-        self.agent.get(&self.url(path)).set("Authorization", &format!("Bearer {}", self.token))
+        let s = self.settings();
+        self.agent.get(&format!("{}{}", s.base, path)).set("Authorization", &format!("Bearer {}", s.token))
     }
 
     fn post(&self, path: &str) -> ureq::Request {
-        self.agent.post(&self.url(path)).set("Authorization", &format!("Bearer {}", self.token))
+        let s = self.settings();
+        self.agent.post(&format!("{}{}", s.base, path)).set("Authorization", &format!("Bearer {}", s.token))
     }
 
     fn post_json(&self, path: &str, body: serde_json::Value) -> Result<ureq::Response, ApiError> {
@@ -274,13 +292,14 @@ impl MusikApi for HttpApi {
 
     #[allow(clippy::result_large_err)]
     fn event(&self, event: &Event) -> Result<EventResult, ApiError> {
+        let Settings { client_id, device_id, .. } = self.settings();
         let mut body = serde_json::json!({
             "type": event.kind,
             "event_id": event.event_id,
             "track_id": event.track_id,
             "session_id": event.session_id,
-            "client_id": self.client_id,
-            "device_id": self.device_id,
+            "client_id": client_id,
+            "device_id": device_id,
             "position_sec": event.position_sec,
             "duration_sec": event.duration_sec,
             "listened_sec": event.listened_sec,
@@ -309,6 +328,10 @@ impl MusikApi for HttpApi {
         self.post_json("/api/favorites", serde_json::json!({ "type": "track", "track_id": track_id })).map(|_| ())
     }
 
+    fn configure(&self, server: &str, token: &str, device_name: &str) {
+        *self.settings.write().unwrap_or_else(|e| e.into_inner()) = Settings::new(server, token, device_name);
+    }
+
     fn auth_ok(&self) -> Result<bool, ApiError> {
         #[derive(Deserialize)]
         struct Me {
@@ -323,8 +346,9 @@ impl MusikApi for HttpApi {
 impl Fetcher for HttpApi {
     fn open(&self, url: &str) -> Result<Opened, ApiError> {
         let mut request = self.stream_agent.get(url);
-        if url.starts_with(&self.base) {
-            request = request.set("Authorization", &format!("Bearer {}", self.token));
+        let s = self.settings();
+        if !s.base.is_empty() && url.starts_with(&s.base) {
+            request = request.set("Authorization", &format!("Bearer {}", s.token));
         }
         let response = request.call().map_err(map_error)?;
         let content_type =

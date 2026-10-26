@@ -190,6 +190,7 @@ impl Engine {
             Msg::Reload(cfg) => {
                 self.guard.set_enabled(cfg.voice);
                 self.player_duck_level_changed(&cfg);
+                self.api.configure(&cfg.server, &cfg.token, &cfg.device_name);
                 self.cfg = *cfg;
                 self.next_library_ms = 0;
             }
@@ -953,6 +954,41 @@ mod tests {
         fn drop(&mut self) {
             let _ = std::fs::remove_dir_all(&self.dir);
         }
+    }
+
+    #[test]
+    fn login_after_start_takes_effect_without_restart() {
+        let server = FakeServer::start(handler);
+        let dir = std::env::temp_dir().join(format!("musikalice-late-login-{}", new_event_id()));
+        // Служба стартует до `login`: пустые адрес и токен.
+        let api = Arc::new(HttpApi::new("", "", ""));
+        let output = Box::new(NullOutput::new(44100, Arc::new(Mutex::new(Vec::new()))));
+        let handle = launch(
+            Config { earcons: false, ..Config::default() },
+            dir.clone(),
+            api,
+            output,
+            Arc::new(FakeNative::default()),
+            Arc::new(NullMixer::new(10)),
+        );
+        assert_eq!(handle.status().unwrap().library, 0);
+        let configured = Config { server: server.url(), token: "tok".into(), earcons: false, ..Config::default() };
+        handle.tx.send(Msg::Reload(Box::new(configured))).unwrap();
+        let deadline = Instant::now() + Duration::from_secs(8);
+        while handle.status().unwrap().library != 3 {
+            assert!(Instant::now() < deadline, "каталог не загрузился: {:?}", handle.status().unwrap().message);
+            thread::sleep(Duration::from_millis(50));
+        }
+        handle.request(Intent::Radio, false).unwrap();
+        let deadline = Instant::now() + Duration::from_secs(8);
+        while handle.status().unwrap().state != State::Playing {
+            assert!(Instant::now() < deadline, "музыка не пошла: {:?}", handle.status().unwrap().message);
+            thread::sleep(Duration::from_millis(50));
+        }
+        let auth = server.requests().into_iter().find(|r| r.path == "/api/library").unwrap().header("authorization");
+        assert_eq!(auth.as_deref(), Some("Bearer tok"));
+        handle.shutdown();
+        std::fs::remove_dir_all(&dir).ok();
     }
 
     #[test]
